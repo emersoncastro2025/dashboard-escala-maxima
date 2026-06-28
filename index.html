@@ -4608,25 +4608,22 @@ function jsonpRequest(url, callback) {
 }
 
 function fetchGoogleAdsData(url, callback) {
-    // Tenta fetch() primeiro (funciona em https://, ex: Vercel)
-    // Se falhar (ex: file://), usa JSONP como fallback
-    if (window.location.protocol === 'https:' || window.location.protocol === 'http:') {
-        fetch(url)
-            .then(function(r) { return r.json(); })
-            .then(function(json) { processGoogleAdsData(json, callback); })
-            .catch(function(err) {
-                console.log('fetch falhou, tentando JSONP:', err.message);
-                jsonpRequest(url, function(json, jerr) {
-                    if (jerr) { callback(false, jerr); return; }
-                    processGoogleAdsData(json, callback);
-                });
-            });
-    } else {
-        jsonpRequest(url, function(json, err) {
-            if (err) { callback(false, err); return; }
+    // Sempre usa JSONP primeiro — funciona em file:// e https://
+    // Google Apps Script redireciona (302) e quebra CORS com fetch()
+    jsonpRequest(url, function(json, err) {
+        if (!err) {
             processGoogleAdsData(json, callback);
-        });
-    }
+        } else {
+            // Fallback: tenta fetch() caso JSONP falhe
+            console.log('JSONP falhou, tentando fetch():', err);
+            fetch(url, { redirect: 'follow' })
+                .then(function(r) { return r.json(); })
+                .then(function(json) { processGoogleAdsData(json, callback); })
+                .catch(function(ferr) {
+                    callback(false, 'Não foi possível conectar ao Google Ads. Erro: ' + err);
+                });
+        }
+    });
 }
 
 function processGoogleAdsData(json, callback) {
