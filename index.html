@@ -4529,14 +4529,34 @@ function testGoogleAdsConnection() {
         setGoogleAdsFeedback('Cole a URL do Apps Script antes de testar.', 'error');
         return;
     }
+    if (url.indexOf('script.google.com/macros/s/') === -1) {
+        setGoogleAdsFeedback('❌ URL inválida. A URL deve ser do tipo: https://script.google.com/macros/s/.../exec', 'error');
+        return;
+    }
     setGoogleAdsFeedback('⏳ Testando conexão via JSONP...', 'loading');
     jsonpRequest(url, function(json, err) {
+        console.log('[Google Ads Test] Resposta bruta:', JSON.stringify(json), 'Erro:', err);
         if (err) {
-            setGoogleAdsFeedback('❌ Erro de conexão: ' + err + '. Verifique se a URL está correta e a implantação está pública.', 'error');
-        } else if (json && json.ok) {
-            setGoogleAdsFeedback('✅ Conexão bem-sucedida! ' + json.data.length + ' campanhas encontradas. Clique em Salvar & Carregar Dados.', 'success');
+            // (a) Erro de rede/CORS/URL inválida
+            setGoogleAdsFeedback('❌ Erro de rede: ' + err + '\n\nCausas prováveis:\n• A URL da implantação mudou (reimplantou o Apps Script?)\n• A implantação não está como "Qualquer pessoa"\n• A URL antiga expirou após nova implantação', 'error');
+        } else if (!json) {
+            // (b) Resposta HTML (página de login do Google)
+            setGoogleAdsFeedback('❌ O Apps Script retornou uma página HTML em vez de JSON.\n\nIsso indica que:\n• A implantação perdeu o acesso público\n• Vá no Apps Script → Implantar → Gerenciar → verifique se o acesso é "Qualquer pessoa"', 'error');
+        } else if (typeof json !== 'object') {
+            // (c) JSON malformado
+            setGoogleAdsFeedback('❌ Resposta malformada do Apps Script (não é JSON válido).\nResposta recebida: ' + String(json).substring(0, 200), 'error');
+        } else if (json.ok === false && json.error) {
+            // (c) JSON válido com erro do script
+            setGoogleAdsFeedback('❌ Erro interno do Apps Script: ' + json.error + '\n\nCausas prováveis:\n• O SHEET_ID no script está incorreto\n• A aba da planilha foi renomeada ou deletada\n• A planilha não existe mais', 'error');
+        } else if (json.ok && json.data && json.data.length > 0) {
+            // Sucesso
+            setGoogleAdsFeedback('✅ Conexão bem-sucedida! ' + json.data.length + ' registros encontrados. Clique em Salvar & Carregar Dados.', 'success');
+        } else if (json.ok && (!json.data || json.data.length === 0)) {
+            // (d) JSON válido mas vazio
+            setGoogleAdsFeedback('⚠️ Conexão OK, mas a planilha está vazia (0 registros).\n\nVerifique se a planilha do Google Ads tem dados e se a aba está correta.', 'error');
         } else {
-            setGoogleAdsFeedback('❌ Erro do Apps Script: ' + ((json && json.error) || 'Resposta inesperada.'), 'error');
+            // Formato inesperado
+            setGoogleAdsFeedback('❌ Resposta inesperada do Apps Script.\nJSON recebido: ' + JSON.stringify(json).substring(0, 300) + '\n\nVerifique se o código do doGet() está correto e retorna { ok: true, data: [...] }', 'error');
         }
     });
 }
@@ -4580,7 +4600,8 @@ function jsonpRequest(url, callback) {
         if (!done) {
             done = true;
             cleanup();
-            callback(null, 'Tempo esgotado (timeout). Verifique a URL.');
+            console.warn('[JSONP] Timeout após 15s para:', url);
+            callback(null, 'Tempo esgotado (timeout 15s). A URL pode estar incorreta ou a implantação expirou.');
         }
     }, 15000);
     window[cbName] = function(data) {
@@ -4588,47 +4609,96 @@ function jsonpRequest(url, callback) {
             done = true;
             clearTimeout(timeout);
             cleanup();
+            console.log('[JSONP] Resposta recebida:', typeof data, data ? JSON.stringify(data).substring(0, 500) : 'null');
             callback(data, null);
         }
     };
-    script.onerror = function() {
+    script.onerror = function(evt) {
         if (!done) {
             done = true;
             clearTimeout(timeout);
             cleanup();
-            callback(null, 'URL inválida ou acesso negado. Verifique se a implantação está como \'Qualquer pessoa\'.');
+            console.error('[JSONP] script.onerror disparado para:', url, evt);
+            callback(null, 'Falha ao carregar o script. Causas prováveis: URL inválida, implantação expirou (foi reimplantado?), ou acesso não é "Qualquer pessoa".');
         }
     };
     function cleanup() {
         delete window[cbName];
         if (script.parentNode) script.parentNode.removeChild(script);
     }
-    script.src = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'callback=' + cbName;
+    var finalUrl = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'callback=' + cbName;
+    console.log('[JSONP] Requisitando:', finalUrl);
+    script.src = finalUrl;
     document.head.appendChild(script);
 }
 
 function fetchGoogleAdsData(url, callback) {
+    console.log('[Google Ads] Iniciando fetch para:', url);
     // Sempre usa JSONP primeiro — funciona em file:// e https://
-    // Google Apps Script redireciona (302) e quebra CORS com fetch()
     jsonpRequest(url, function(json, err) {
-        if (!err) {
+        if (!err && json) {
+            console.log('[Google Ads] JSONP sucesso, processando dados...');
             processGoogleAdsData(json, callback);
         } else {
             // Fallback: tenta fetch() caso JSONP falhe
-            console.log('JSONP falhou, tentando fetch():', err);
+            console.warn('[Google Ads] JSONP falhou:', err, '— tentando fetch()...');
             fetch(url, { redirect: 'follow' })
-                .then(function(r) { return r.json(); })
-                .then(function(json) { processGoogleAdsData(json, callback); })
+                .then(function(r) {
+                    console.log('[Google Ads] fetch status:', r.status, 'content-type:', r.headers.get('content-type'));
+                    var contentType = r.headers.get('content-type') || '';
+                    if (contentType.indexOf('text/html') >= 0) {
+                        return r.text().then(function(html) {
+                            console.error('[Google Ads] Recebeu HTML em vez de JSON:', html.substring(0, 300));
+                            throw new Error('O Apps Script retornou HTML (página de login/erro). Verifique se a implantação está pública e a URL é a mais recente.');
+                        });
+                    }
+                    return r.text();
+                })
+                .then(function(text) {
+                    console.log('[Google Ads] fetch raw response:', text.substring(0, 500));
+                    try {
+                        var parsed = JSON.parse(text);
+                        processGoogleAdsData(parsed, callback);
+                    } catch(parseErr) {
+                        callback(false, 'JSON malformado do Apps Script. Resposta (primeiros 200 chars): ' + text.substring(0, 200));
+                    }
+                })
                 .catch(function(ferr) {
-                    callback(false, 'Não foi possível conectar ao Google Ads. Erro: ' + err);
+                    callback(false, ferr.message || 'Não foi possível conectar. Verifique se a URL da implantação está correta e pública.');
                 });
         }
     });
 }
 
 function processGoogleAdsData(json, callback) {
-    if (!json || !json.ok) {
-        callback(false, 'Erro do Apps Script: ' + ((json && json.error) || 'Desconhecido'));
+    console.log('[Google Ads] processGoogleAdsData recebeu:', json ? JSON.stringify(json).substring(0, 500) : 'null');
+    if (!json || typeof json !== 'object') {
+        callback(false, 'Resposta inválida: esperava JSON, recebeu ' + typeof json + '. Verifique se a URL do Apps Script está correta.');
+        return;
+    }
+    if (json.ok === false) {
+        var errorDetail = json.error || 'Erro desconhecido no script';
+        var hint = '';
+        if (errorDetail.indexOf('not found') >= 0 || errorDetail.indexOf('Não encontr') >= 0) {
+            hint = '\n→ A planilha pode ter sido deletada ou o SHEET_ID está incorreto.';
+        } else if (errorDetail.indexOf('permission') >= 0 || errorDetail.indexOf('permiss') >= 0) {
+            hint = '\n→ O Apps Script não tem permissão para acessar a planilha.';
+        } else if (errorDetail.indexOf('vazia') >= 0 || errorDetail.indexOf('empty') >= 0) {
+            hint = '\n→ A planilha existe mas não tem dados. Exporte dados do Google Ads para ela.';
+        }
+        callback(false, 'Erro do Apps Script: ' + errorDetail + hint);
+        return;
+    }
+    if (!json.ok) {
+        callback(false, 'Resposta inesperada: o campo "ok" não é true. JSON: ' + JSON.stringify(json).substring(0, 300));
+        return;
+    }
+    if (!json.data || !Array.isArray(json.data)) {
+        callback(false, 'Resposta sem campo "data" ou data não é array. Verifique o código doGet() do Apps Script.');
+        return;
+    }
+    if (json.data.length === 0) {
+        callback(false, 'Planilha conectada mas sem dados (0 registros). Verifique se a planilha do Google Ads tem dados na aba correta.');
         return;
     }
 
