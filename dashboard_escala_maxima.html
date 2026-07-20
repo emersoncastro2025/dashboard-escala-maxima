@@ -4105,7 +4105,7 @@ function renderVisaoGeral() {
 
     const leadsMeta = meta.reduce((s, r) => s + r.leads, 0);
     const leadsGoogle = google.reduce((s, r) => s + r.conversoes, 0);
-    const leadsSocial = social.length;
+    const leadsSocial = filterByDate(ROMERO_SS_CRM).length;
     const leadsTotal = leadsMeta + leadsGoogle + leadsSocial;
 
     const cplMedio = leadsTotal > 0 ? investTotal / leadsTotal : 0;
